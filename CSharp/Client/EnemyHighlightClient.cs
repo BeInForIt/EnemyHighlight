@@ -3,16 +3,40 @@ using Barotrauma;
 using HarmonyLib;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
+using Microsoft.Xna.Framework.Input;
 
 namespace EnemyHighlightMod
 {
     internal sealed class EnemyHighlightClient : IAssemblyPlugin, IDisposable
     {
+        private readonly struct CharacterScreenData
+        {
+            public CharacterScreenData(Vector2 worldAnchor, Vector2 screenBase, Vector2 screenTop, Rectangle boxRect, float distance, float health01, string label, bool isOnScreen)
+            {
+                WorldAnchor = worldAnchor;
+                ScreenBase = screenBase;
+                ScreenTop = screenTop;
+                BoxRect = boxRect;
+                Distance = distance;
+                Health01 = health01;
+                Label = label;
+                IsOnScreen = isOnScreen;
+            }
+
+            public Vector2 WorldAnchor { get; }
+            public Vector2 ScreenBase { get; }
+            public Vector2 ScreenTop { get; }
+            public Rectangle BoxRect { get; }
+            public float Distance { get; }
+            public float Health01 { get; }
+            public string Label { get; }
+            public bool IsOnScreen { get; }
+        }
+
         internal static EnemyHighlightClient Instance { get; private set; }
 
         private Harmony harmony;
-        private double nextDebugLogTime;
-        private bool espEnabled = false;
+        private bool espEnabled;
         private bool toggleKeyPressed;
 
         public void Initialize()
@@ -46,14 +70,14 @@ namespace EnemyHighlightMod
 
         private void HandleToggle()
         {
-            var keyboard = Microsoft.Xna.Framework.Input.Keyboard.GetState();
+            KeyboardState keyboard = Keyboard.GetState();
 
-            if (keyboard.IsKeyDown(Microsoft.Xna.Framework.Input.Keys.F6))
+            if (keyboard.IsKeyDown(Keys.F6))
             {
                 if (!toggleKeyPressed)
                 {
                     espEnabled = !espEnabled;
-                    LuaCsLogger.Log("[EnemyHighlight] ESP toggled: " + espEnabled);
+                    GUI.AddMessage("Enemy Highlight: " + (espEnabled ? "ON" : "OFF"), GUIStyle.Green, lifeTime: 2.0f, playSound: false, font: GUIStyle.Font);
                 }
 
                 toggleKeyPressed = true;
@@ -69,124 +93,210 @@ namespace EnemyHighlightMod
             if (screen == null) { return; }
             if (spriteBatch == null) { return; }
             if (GUI.DisableHUD) { return; }
-            if (!(Screen.Selected is GameScreen)) { return; }
+            if (Screen.Selected is not GameScreen) { return; }
 
             Camera cam = screen.Cam;
-            if (cam == null) { return; }
-
             Character controlled = Character.Controlled;
-            if (controlled == null) { return; }
 
             HandleToggle();
 
             if (!espEnabled) { return; }
-
-            int highlightedCount = 0;
-            int drawnCount = 0;
+            if (cam == null) { return; }
+            if (controlled == null) { return; }
 
             foreach (Character character in Character.CharacterList)
             {
-                if (!ShouldHighlight(character)) { continue; }
-                highlightedCount++;
-
-                if (TryDrawBox(spriteBatch, cam, controlled, character))
-                {
-                    drawnCount++;
-                }
-            }
-
-            DrawDebugMarker(spriteBatch, highlightedCount, drawnCount);
-
-            if (Timing.TotalTime >= nextDebugLogTime)
-            {
-                nextDebugLogTime = Timing.TotalTime + 2.0;
-                LuaCsLogger.Log(
-                    "[EnemyHighlight] Draw pass active. Highlighted characters: " +
-                    highlightedCount +
-                    ", drawn markers: " +
-                    drawnCount
-                );
+                if (!ShouldHighlight(controlled, character)) { continue; }
+                TryDrawTargetVisuals(spriteBatch, cam, controlled, character);
             }
         }
 
-        private static bool TryDrawBox(SpriteBatch spriteBatch, Camera cam, Character controlled, Character character)
+        private static bool TryDrawTargetVisuals(SpriteBatch spriteBatch, Camera cam, Character controlled, Character character)
         {
             if (spriteBatch == null) { return false; }
             if (cam == null) { return false; }
             if (controlled == null) { return false; }
             if (character == null) { return false; }
-
-            Vector2 worldPos = character.WorldPosition;
-            Vector2 screenPos = cam.WorldToScreen(worldPos);
-
-            if (float.IsNaN(screenPos.X) || float.IsNaN(screenPos.Y)) { return false; }
-            if (float.IsInfinity(screenPos.X) || float.IsInfinity(screenPos.Y)) { return false; }
-
-            float dist = Vector2.Distance(controlled.WorldPosition, character.WorldPosition);
-            if (dist <= 0.01f) { dist = 0.01f; }
-
-            float size = MathHelper.Clamp(7000f / dist, 12f, 40f);
-
-            int w = (int)size;
-            int h = (int)(size * 1.6f);
-
-            Rectangle rect = new Rectangle(
-                (int)screenPos.X - w / 2,
-                (int)screenPos.Y - h / 2,
-                w,
-                h
-            );
+            if (!TryGetCharacterScreenData(cam, controlled, character, out CharacterScreenData data)) { return false; }
 
             Color color = GetIndicatorColor(character);
 
-            GUI.DrawRectangle(spriteBatch, rect, color, false, 0f, 2f);
+            if (!data.IsOnScreen)
+            {
+                DrawOffScreenIndicator(spriteBatch, cam, data, color);
+                return true;
+            }
+
+            DrawCornerBox(spriteBatch, data.BoxRect, color);
+            DrawHealthBar(spriteBatch, data.BoxRect, data.Health01, color);
+            DrawLabel(spriteBatch, data.Label, new Vector2(data.ScreenTop.X, data.BoxRect.Top - 28), color, GUIStyle.Font, 4);
+            DrawLabel(spriteBatch, ((int)MathF.Round(data.Distance)).ToString(), new Vector2(data.ScreenBase.X, data.BoxRect.Bottom + 10), Color.White, GUIStyle.SmallFont, 3);
 
             return true;
         }
 
-        private static void DrawDebugMarker(SpriteBatch spriteBatch, int highlightedCount, int drawnCount)
+        private static bool TryGetCharacterScreenData(Camera cam, Character controlled, Character character, out CharacterScreenData data)
         {
-            Color markerColor;
+            data = default;
 
-            if (highlightedCount > 0 && drawnCount > 0)
+            if (cam == null) { return false; }
+            if (controlled == null) { return false; }
+            if (character == null) { return false; }
+
+            Vector2 baseWorld = character.DrawPosition;
+            if (baseWorld == Vector2.Zero) { baseWorld = character.WorldPosition; }
+
+            Vector2 topWorld = character.AnimController?.GetLimb(LimbType.Head)?.body?.DrawPosition ?? (baseWorld + Vector2.UnitY * 100.0f);
+            Vector2 screenBase = cam.WorldToScreen(baseWorld);
+            Vector2 screenTop = cam.WorldToScreen(topWorld);
+
+            if (!IsFinite(screenBase) || !IsFinite(screenTop)) { return false; }
+
+            float verticalSpan = Math.Abs(screenBase.Y - screenTop.Y);
+            if (verticalSpan < 12.0f)
             {
-                markerColor = new Color(0, 255, 0, 220);
-            }
-            else if (highlightedCount > 0)
-            {
-                markerColor = new Color(255, 0, 255, 220);
-            }
-            else
-            {
-                markerColor = new Color(255, 255, 0, 220);
+                float distance = Vector2.Distance(controlled.WorldPosition, character.WorldPosition);
+                verticalSpan = MathHelper.Clamp(7000.0f / Math.Max(distance, 1.0f), 14.0f, 44.0f);
             }
 
-            GUI.DrawRectangle(
-                spriteBatch,
-                new Rectangle(20, 20, 140, 40),
-                markerColor,
-                true,
-                0f,
-                1f
+            float height = MathHelper.Clamp(verticalSpan * 2.4f, 32.0f, 180.0f);
+            float width = MathHelper.Clamp(height * 0.62f, 18.0f, 120.0f);
+
+            Rectangle boxRect = new Rectangle(
+                (int)MathF.Round(screenBase.X - width * 0.5f),
+                (int)MathF.Round(screenBase.Y - height * 0.5f),
+                Math.Max(1, (int)MathF.Round(width)),
+                Math.Max(1, (int)MathF.Round(height))
             );
+
+            float distanceValue = Vector2.Distance(controlled.WorldPosition, character.WorldPosition);
+            float health01 = GetHealth01(character);
+            string label = !string.IsNullOrWhiteSpace(character.Info?.DisplayName) ? character.Info.DisplayName : character.Name;
+            bool isOnScreen =
+                screenBase.X >= 0.0f &&
+                screenBase.X <= GameMain.GraphicsWidth &&
+                screenBase.Y >= 0.0f &&
+                screenBase.Y <= GameMain.GraphicsHeight;
+
+            data = new CharacterScreenData(baseWorld, screenBase, screenTop, boxRect, distanceValue, health01, label, isOnScreen);
+            return true;
         }
 
-        private static bool ShouldHighlight(Character character)
+        private static void DrawCornerBox(SpriteBatch spriteBatch, Rectangle rect, Color color)
+        {
+            if (rect.Width <= 0 || rect.Height <= 0) { return; }
+
+            float thickness = 2.0f;
+            float cornerWidth = Math.Max(6.0f, rect.Width * 0.3f);
+            float cornerHeight = Math.Max(6.0f, rect.Height * 0.22f);
+
+            Vector2 topLeft = new Vector2(rect.Left, rect.Top);
+            Vector2 topRight = new Vector2(rect.Right, rect.Top);
+            Vector2 bottomLeft = new Vector2(rect.Left, rect.Bottom);
+            Vector2 bottomRight = new Vector2(rect.Right, rect.Bottom);
+
+            GUI.DrawLine(spriteBatch, topLeft, topLeft + Vector2.UnitX * cornerWidth, color, width: thickness);
+            GUI.DrawLine(spriteBatch, topLeft, topLeft + Vector2.UnitY * cornerHeight, color, width: thickness);
+
+            GUI.DrawLine(spriteBatch, topRight, topRight - Vector2.UnitX * cornerWidth, color, width: thickness);
+            GUI.DrawLine(spriteBatch, topRight, topRight + Vector2.UnitY * cornerHeight, color, width: thickness);
+
+            GUI.DrawLine(spriteBatch, bottomLeft, bottomLeft + Vector2.UnitX * cornerWidth, color, width: thickness);
+            GUI.DrawLine(spriteBatch, bottomLeft, bottomLeft - Vector2.UnitY * cornerHeight, color, width: thickness);
+
+            GUI.DrawLine(spriteBatch, bottomRight, bottomRight - Vector2.UnitX * cornerWidth, color, width: thickness);
+            GUI.DrawLine(spriteBatch, bottomRight, bottomRight - Vector2.UnitY * cornerHeight, color, width: thickness);
+        }
+
+        private static void DrawHealthBar(SpriteBatch spriteBatch, Rectangle boxRect, float health01, Color color)
+        {
+            int barWidth = Math.Max(28, boxRect.Width + 14);
+            int barHeight = 7;
+            int x = boxRect.Center.X - barWidth / 2;
+            int y = boxRect.Top - 12;
+
+            Rectangle backgroundRect = new Rectangle(x, y, barWidth, barHeight);
+            Rectangle fillRect = new Rectangle(x + 1, y + 1, Math.Max(0, (int)MathF.Round((barWidth - 2) * health01)), Math.Max(1, barHeight - 2));
+            Color fillColor = Color.Lerp(GUIStyle.Red, GUIStyle.Green, health01);
+
+            GUI.DrawRectangle(spriteBatch, backgroundRect, Color.Black * 0.75f, true);
+            GUI.DrawRectangle(spriteBatch, backgroundRect, color * 0.9f, false, 0.0f, 1.0f);
+            if (fillRect.Width > 0)
+            {
+                GUI.DrawRectangle(spriteBatch, fillRect, fillColor * 0.95f, true);
+            }
+
+            DrawLabel(spriteBatch, ((int)MathF.Round(health01 * 100.0f)).ToString() + "%", new Vector2(boxRect.Center.X, y - 10), Color.White, GUIStyle.SmallFont, 2);
+        }
+
+        private static void DrawLabel(SpriteBatch spriteBatch, string text, Vector2 centerPosition, Color color, GUIFont font, int backgroundPadding)
+        {
+            if (spriteBatch == null) { return; }
+            if (font == null) { font = GUIStyle.Font; }
+            if (string.IsNullOrWhiteSpace(text)) { return; }
+
+            Vector2 size = font.MeasureString(text);
+            Vector2 drawPosition = new Vector2(
+                (float)Math.Floor(centerPosition.X - size.X * 0.5f),
+                (float)Math.Floor(centerPosition.Y - size.Y * 0.5f)
+            );
+
+            GUI.DrawString(spriteBatch, drawPosition, text, color, Color.Black * 0.65f, backgroundPadding, font);
+        }
+
+        private static void DrawOffScreenIndicator(SpriteBatch spriteBatch, Camera cam, CharacterScreenData data, Color color)
+        {
+            Sprite sprite = GUIStyle.EnemyIcon.Value?.Sprite ?? GUI.Arrow;
+            if (sprite == null) { return; }
+
+            GUI.DrawIndicator(spriteBatch, data.WorldAnchor, cam, 0.0f, sprite, color, createOffset: true, scaleMultiplier: 0.75f, overrideAlpha: 0.95f);
+        }
+
+        private static bool ShouldHighlight(Character controlled, Character character)
         {
             if (character == null) { return false; }
+            if (controlled == null) { return false; }
             if (character.Removed) { return false; }
             if (character.IsDead) { return false; }
+            if (character == controlled) { return false; }
 
-            return true;
+            if (!character.IsHuman) { return true; }
+
+            return character.TeamID != controlled.TeamID;
         }
 
         private static Color GetIndicatorColor(Character character)
         {
-            if (character == null) { return Color.Red * 0.85f; }
+            if (character == null) { return Color.Red; }
 
             return character.IsHuman
-                ? Color.Cyan * 0.85f
-                : Color.Red * 0.85f;
+                ? new Color(255, 196, 96, 235)
+                : new Color(255, 84, 84, 235);
+        }
+
+        private static float GetHealth01(Character character)
+        {
+            if (character == null) { return 0.0f; }
+
+            float maxVitality = Math.Max(character.MaxVitality, 0.0f);
+            if (maxVitality <= 0.0f) { return 0.0f; }
+
+            float vitality = character.CharacterHealth != null ? character.CharacterHealth.DisplayedVitality : character.Vitality;
+            if (float.IsNaN(vitality) || float.IsInfinity(vitality))
+            {
+                vitality = character.Vitality;
+            }
+
+            return MathHelper.Clamp(vitality / maxVitality, 0.0f, 1.0f);
+        }
+
+        private static bool IsFinite(Vector2 value)
+        {
+            return
+                !float.IsNaN(value.X) &&
+                !float.IsNaN(value.Y) &&
+                !float.IsInfinity(value.X) &&
+                !float.IsInfinity(value.Y);
         }
     }
 

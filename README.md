@@ -6,15 +6,14 @@ Barotrauma
 
 ## Description
 
-Client-side ESP overlay that draws rectangles around characters (enemies and humans). Toggle with F6. Intended to highlight hostile and friendly NPCs for visibility.
+Client-side overlay that highlights eligible characters: non-humans always, humans only when their team differs from the controlled character's. Draws corner boxes, health bar, name, distance when on-screen; off-screen targets use the game's indicator arrow. F6 toggles ESP; toggle state is shown with a short on-screen message.
 
 ## Features
 
-- **Character indicators**: Box outlines around non-removed, non-dead characters.
-- **Color coding**: Red for non-human (enemies), cyan for humans.
-- **Distance-based size**: Marker size scales inversely with distance (clamped 12–40px).
-- F6 toggles ESP on/off.
-- Debug marker in corner (green when active, yellow when no characters, magenta when highlighting but not drawing).
+- **F6**: Toggle highlight on/off.
+- **Filtering**: Excludes self, removed, and dead characters. Crew on same team are not highlighted as enemies.
+- **On-screen**: Corner frame, vitality bar with percentage, display name, distance in world units.
+- **Off-screen**: Directional indicator using `GUIStyle.EnemyIcon` or `GUI.Arrow`.
 
 ## Installation
 
@@ -34,4 +33,3 @@ Copy the mod folder into Barotrauma's local mods directory. Enable the mod in Co
 ## Technical Notes
 
 - Client-only: `CSharp/Client/` assembly.
-- Highlights all characters (including crew); non-humans shown in red, humans in cyan.
